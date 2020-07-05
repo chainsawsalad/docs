@@ -140,11 +140,55 @@ const askPath = () => {
           return;
         }
 
-        recursive(answers.path, function (error, files) {
+        recursive(answers.path, ['.*'], function (error, files) {
           spinner.succeed(files.length + ' files in this directory');
-          askTag();
+          askDefaultsTag();
         });
       });
+    });
+  });
+};
+
+// Ask if you want to use tag defaults, or re-collect
+const askDefaultsTag = () => {
+  console.log('');
+
+  // Load tags
+  const spinner = ora({
+    text: 'Loading tags',
+    spinner: 'flips'
+  }).start();
+
+  request.get({
+    url: prefs.importer.baseUrl + '/api/tag/list',
+  }, function (error, response, body) {
+    if (error || !response || response.statusCode !== 200) {
+      spinner.fail('Error loading tags');
+      askDefaultsTag();
+      return;
+    }
+
+    spinner.succeed('Tags loaded');
+    const tags = JSON.parse(body).tags;
+    const preferenceTags = prefs.importer.tag.split(',');
+    const defaultTags = preferenceTags.map(preferenceTag => _.findWhere(tags, { name: preferenceTag }));
+    const defaultTagNames = defaultTags.map(defaultTag => defaultTag ? defaultTag.name : 'No tag').join();
+
+    inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'useDefaultTag',
+        message: 'Use default tags to all documents? (' + defaultTagNames + ')',
+        default: true,
+      }
+    ]).then(answers => {
+      // Save tag
+      if (answers.useDefaultTag) {
+        askAddTag();
+      } else {
+        prefs.importer.tag = [];
+        askTag();
+      }
     });
   });
 };
@@ -170,8 +214,7 @@ const askTag = () => {
 
     spinner.succeed('Tags loaded');
     const tags = JSON.parse(body).tags;
-    const defaultTag = _.findWhere(tags, { id: prefs.importer.tag });
-    const defaultTagName = defaultTag ? defaultTag.name : 'No tag';
+    const defaultTagName = 'No tag';
 
     inquirer.prompt([
       {
@@ -183,9 +226,13 @@ const askTag = () => {
       }
     ]).then(answers => {
       // Save tag
-      prefs.importer.tag = answers.tag === 'No tag' ?
-        '' : _.findWhere(tags, { name: answers.tag }).id;
-      askAddTag();
+      if (answers.tag === 'No tag') {
+        prefs.importer.tag = prefs.importer.tag.join();
+        askAddTag();
+      } else {
+        prefs.importer.tag.push(answers.tag);
+        askTag();
+      }
     });
   });
 };
@@ -241,8 +288,26 @@ const askLang = () => {
     ]).then(answers => {
       // Save tag
       prefs.importer.lang = answers.lang
-      askDaemon();
+      askExtension();
     });
+  });
+};
+
+// Ask for remove filename extension
+const askExtension = () => {
+  console.log('');
+
+  inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'extension',
+      message: 'Do you want to remove the file extension from the document name??',
+      default: prefs.importer.extension === true
+    }
+  ]).then(answers => {
+    // Save extension
+    prefs.importer.extension = answers.extension;
+    askDaemon();
   });
 };
 
@@ -301,7 +366,7 @@ const start = () => {
 
 // Import the files
 const importFiles = (remove, filesImported) => {
-  recursive(prefs.importer.path, function (error, files) {
+  recursive(prefs.importer.path, ['.*'], function (error, files) {
     if (files.length === 0) {
       filesImported();
       return;
@@ -329,11 +394,17 @@ const importFile = (file, remove, resolve) => {
 
   // Remove path of file
   let filename = file.replace(/^.*[\\\/]/, '');
+  if (prefs.importer.extension) {
+    filename = filename.substr(0, filename.lastIndexOf('.')) || filename;
+  }
 
   // Get Tags given as hashtags from filename
-  let taglist = filename.match(/#[^\s:#]+/mg);
+  let taglist = filename.match(/#[^\s:#\.]+/mg);
   taglist = taglist ? taglist.map(s => s.substr(1)) : [];
-  
+  if (prefs.importer.tag) {
+    taglist.push.apply(taglist, prefs.importer.tag.split(','));
+  }
+
   // Get available tags and UUIDs from server
   request.get({
       url: prefs.importer.baseUrl + '/api/tag/list',
@@ -342,7 +413,7 @@ const importFile = (file, remove, resolve) => {
       spinner.fail('Error loading tags');
       return;
     }
-    
+
     let tagsarray = {};
     for (let l of JSON.parse(body).tags) {
       tagsarray[l.name] = l.id;
@@ -354,37 +425,27 @@ const importFile = (file, remove, resolve) => {
       if (tagsarray.hasOwnProperty(j) && !foundtags.includes(tagsarray[j])) {
         foundtags.push(tagsarray[j]);
         filename = filename.split('#'+j).join('');
+      } else {
+        spinner.warn(`Tag "${ j }" not found in system for "${ filename }"`);
       }
     }
-    if (prefs.importer.tag !== '' && !foundtags.includes(prefs.importer.tag)){
-      foundtags.push(prefs.importer.tag);
-    }
-    
-    let data = {}
-    if (prefs.importer.addtags) {
-      data = {
-        title: prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
-        language: prefs.importer.lang || 'eng',
-        tags: foundtags 
-      }
-    }
-    else {
-      data = {
-        title: prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
-        language: prefs.importer.lang || 'eng'
-      }
-    }
+
+    const data = {
+      tags: foundtags,
+      title: prefs.importer.addtags ? filename : file.replace(/^.*[\\\/]/, '').substring(0, 100),
+      language: prefs.importer.lang || 'eng',
+    };
     // Create document
     request.put({
       url: prefs.importer.baseUrl + '/api/document',
       form: qs.stringify(data)
     }, function (error, response, body) {
       if (error || !response || response.statusCode !== 200) {
-        spinner.fail('Upload failed for ' + file + ': ' + error);
+        spinner.fail('Upload failed for "' + file + '": ' + error);
         resolve();
         return;
       }
-      
+
       // Upload file
       request.put({
         url: prefs.importer.baseUrl + '/api/file',
@@ -394,11 +455,11 @@ const importFile = (file, remove, resolve) => {
         }
       }, function (error, response) {
         if (error || !response || response.statusCode !== 200) {
-          spinner.fail('Upload failed for ' + file + ': ' + error);
+          spinner.fail('Upload failed for "' + file + '": ' + error);
           resolve();
           return;
         }
-        spinner.succeed('Upload successful for ' + file);
+        spinner.succeed('Upload successful for "' + file + '"');
         if (remove) {
           fs.unlinkSync(file);
         }
