@@ -170,7 +170,7 @@ const askDefaultsTag = () => {
 
     spinner.succeed('Tags loaded');
     const tags = JSON.parse(body).tags;
-    const preferenceTags = prefs.importer.tag.split(',');
+    const preferenceTags = prefs.importer.tag ? prefs.importer.tag.split(',') : [];
     const defaultTags = preferenceTags.map(preferenceTag => _.findWhere(tags, { name: preferenceTag }));
     const defaultTagNames = defaultTags.map(defaultTag => defaultTag ? defaultTag.name : 'No tag').join();
 
@@ -227,7 +227,7 @@ const askTag = () => {
     ]).then(answers => {
       // Save tag
       if (answers.tag === 'No tag') {
-        prefs.importer.tag = prefs.importer.tag.join();
+        prefs.importer.tag = prefs.importer.tag ? prefs.importer.tag.join() : '';
         askAddTag();
       } else {
         prefs.importer.tag.push(answers.tag);
